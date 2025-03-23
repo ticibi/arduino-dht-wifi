@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Sensor Dashboard</title>
+  <style>
+    body {
+      background-color: #121212;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 20px;
+    }
+    .container {
+      max-width: 800px;
+      margin: auto;
+    }
+    h1 {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .dropdowns, .controls {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 20px;
+      align-items: center;
+    }
+    label {
+      margin-right: 5px;
+    }
+    select, button {
+      background-color: #1e1e1e;
+      color: #e0e0e0;
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 6px;
+    }
+    button {
+      cursor: pointer;
+    }
+    .sensor-data {
+      text-align: center;
+      margin-bottom: 20px;
+      font-size: 1.2em;
+    }
+    .status {
+      text-align: center;
+      margin-bottom: 10px;
+      font-size: 1em;
+      color: #ff5555;
+    }
+    .chart-container {
+      position: relative;
+      height: 300px;
+      background-color: #1e1e1e;
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 10px;
+    }
+  </style>
+  <!-- Load Socket.IO (v4) and Chart.js -->
+  <script src="https://cdn.socket.io/4.6.1/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>Sensor Dashboard</h1>
+    <div class="dropdowns">
+      <div>
+        <label for="com_port">COM Port:</label>
+        <select id="com_port">
+          <option value="COM1">COM1</option>
+          <option value="COM2">COM2</option>
+          <option value="COM3" selected>COM3</option>
+          <option value="COM4">COM4</option>
+          <option value="COM5">COM5</option>
+        </select>
+      </div>
+      <div>
+        <label for="baud_rate">Baud Rate:</label>
+        <select id="baud_rate">
+          <option value="9600" selected>9600</option>
+          <option value="19200">19200</option>
+          <option value="38400">38400</option>
+          <option value="57600">57600</option>
+          <option value="115200">115200</option>
+        </select>
+      </div>
+      <div>
+        <button id="update_settings">Update Settings</button>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="sensor-data">
+        <div>Temperature (<span id="unit_label">°C</span>): <span id="temp">N/A</span></div>
+        <div>Humidity (%): <span id="humidity">N/A</span></div>
+      </div>
+      <div>
+        <button id="toggle_unit">Show °F</button>
+      </div>
+    </div>
+    <div class="status" id="connection_status">Connected</div>
+    <div class="chart-container">
+      <canvas id="chartCanvas"></canvas>
+    </div>
+  </div>
+
+  <script>
+    // Global temperature unit ("C" or "F")
+    var tempUnit = "C";
+
+    // Arrays for chart data.
+    var chartLabels = [];    // Using current time strings.
+    var tempDataC = [];
+    var tempDataF = [];
+    var humidityData = [];
+
+    // Setup Chart.js.
+    var ctx = document.getElementById('chartCanvas').getContext('2d');
+    var sensorChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: chartLabels,
+        datasets: [
+          {
+            label: 'Temperature (' + (tempUnit === "C" ? "°C" : "°F") + ')',
+            data: tempUnit === "C" ? tempDataC : tempDataF,
+            borderColor: 'rgba(255, 99, 132, 1)',
+            backgroundColor: 'rgba(255, 99, 132, 0.2)',
+            fill: false,
+            tension: 0.2
+          },
+          {
+            label: 'Humidity (%)',
+            data: humidityData,
+            borderColor: 'rgba(54, 162, 235, 1)',
+            backgroundColor: 'rgba(54, 162, 235, 0.2)',
+            fill: false,
+            tension: 0.2
+          }
+        ]
+      },
+      options: {
+        scales: {
+          x: {
+            title: { display: true, text: 'Time' }
+          },
+          y: {
+            title: { display: true, text: 'Value' },
+            beginAtZero: true
+          }
+        },
+        responsive: true,
+        maintainAspectRatio: false
+      }
+    });
+
+    // Function to update the chart with new sensor data.
+    function updateChart(tempC, tempF, humidity) {
+      var now = new Date().toLocaleTimeString();
+      chartLabels.push(now);
+      tempDataC.push(parseFloat(tempC));
+      tempDataF.push(parseFloat(tempF));
+      humidityData.push(parseFloat(humidity));
+
+      // Update temperature dataset based on current unit.
+      sensorChart.data.datasets[0].data = (tempUnit === "C" ? tempDataC : tempDataF);
+      sensorChart.data.datasets[0].label = 'Temperature (' + (tempUnit === "C" ? "°C" : "°F") + ')';
+      sensorChart.update();
+    }
+
+    // Global variable to track last received message time.
+    var lastMessageTime = Date.now();
+    var connectionStatusElem = document.getElementById("connection_status");
+
+    // Check connection status every second.
+    setInterval(function() {
+      var now = Date.now();
+      // If more than 5 seconds have passed without new data, show "No Connection".
+      if (now - lastMessageTime > 5000) {
+        connectionStatusElem.textContent = "No Connection";
+        connectionStatusElem.style.color = "#ff5555";
+      } else {
+        connectionStatusElem.textContent = "Connected";
+        connectionStatusElem.style.color = "#55ff55";
+      }
+    }, 1000);
+
+    // Open a WebSocket connection to the FastAPI server.
+    var ws = new WebSocket("ws://" + location.host + "/ws");
+    ws.onopen = function() {
+      console.log("WebSocket connected");
+    };
+    ws.onerror = function(error) {
+      console.error("WebSocket error:", error);
+    };
+
+    // Elements for sensor value displays.
+    var tempElem = document.getElementById('temp');
+    var humidityElem = document.getElementById('humidity');
+    var unitLabel = document.getElementById('unit_label');
+
+    // Listen for new sensor data.
+    ws.onmessage = function(event) {
+      console.log("Received:", event.data);
+      // Update the last message timestamp.
+      lastMessageTime = Date.now();
+
+      // Expected format:
+      // "Humidity: 28.00 %	Temperature: 21.40 *C / 70.52 *F"
+      var regex = /Humidity:\s*([\d\.]+)\s*%.*Temperature:\s*([\d\.]+)\s*\*C\s*\/\s*([\d\.]+)\s*\*F/;
+      var matches = event.data.match(regex);
+      if (matches && matches.length >= 4) {
+        var humidity = matches[1].trim();
+        var tempC = matches[2].trim();
+        var tempF = matches[3].trim();
+
+        if (tempUnit === "C") {
+          tempElem.textContent = tempC;
+        } else {
+          tempElem.textContent = tempF;
+        }
+        humidityElem.textContent = humidity;
+        updateChart(tempC, tempF, humidity);
+      } else {
+        console.log("Unexpected data format:", event.data);
+      }
+    };
+
+    // Update settings via REST call.
+    document.getElementById("update_settings").addEventListener("click", function() {
+      var comPort = document.getElementById("com_port").value;
+      var baudRate = document.getElementById("baud_rate").value;
+      fetch("/update_settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ com_port: comPort, baud_rate: baudRate })
+      })
+      .then(response => response.json())
+      .then(data => console.log("Settings updated:", data))
+      .catch(err => console.error(err));
+    });
+
+    // Toggle button to switch between Celsius and Fahrenheit.
+    document.getElementById("toggle_unit").addEventListener("click", function() {
+      if (tempUnit === "C") {
+        tempUnit = "F";
+        this.textContent = "Show °C";
+      } else {
+        tempUnit = "C";
+        this.textContent = "Show °F";
+      }
+      unitLabel.textContent = (tempUnit === "C" ? "°C" : "°F");
+      var lastIndex = tempDataC.length - 1;
+      if (lastIndex >= 0) {
+        tempElem.textContent = (tempUnit === "C" ? tempDataC[lastIndex] : tempDataF[lastIndex]);
+      }
+      sensorChart.data.datasets[0].data = (tempUnit === "C" ? tempDataC : tempDataF);
+      sensorChart.data.datasets[0].label = 'Temperature (' + (tempUnit === "C" ? "°C" : "°F") + ')';
+      sensorChart.update();
+    });
+  </script>
+</body>
+</html>
